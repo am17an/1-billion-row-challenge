@@ -145,7 +145,7 @@ inline size_t fast_hash(const char *buf, size_t len) {
 
 struct HashTable {
 
-  static constexpr size_t HTABLE_SZ = 2048;
+  static constexpr size_t HTABLE_SZ = 4096;
 
   MeasureV2 entries[HTABLE_SZ]{};
   char keys[HTABLE_SZ][32];
@@ -245,14 +245,10 @@ void mmap_sol(const std::string &file_path) {
 
   void *addr = mmap(NULL, bytes, PROT_READ, MAP_SHARED, fileno(fd), 0);
 
-  if (errno != 0) {
-    printf("Could not open file\n");
+  if (addr == MAP_FAILED) {
+    printf("Could not mmap file\n");
     return;
   }
-
-  // size_t offset = 0;
-
-  // char curr_line[256];
 
   auto do_chunk = [&](char *chunk_start, char *chunk_end, bool is_first_chunk,
                       HashTable &hash_table) {
@@ -276,29 +272,6 @@ void mmap_sol(const std::string &file_path) {
 
       char * ptr = (char *)memchr(curr_line, ';', curr);
       str_end = ptr - curr_line;
-      /*
-      for (size_t i = 0; i < curr; ++i) {
-        if (curr_line[i] == ';') {
-          parse_int = true;
-          str_end = i;
-          break;
-        }
-
-        if (parse_int) {
-          if (curr_line[i] == '-') {
-            negative = true;
-            continue;
-          }
-          if (curr_line[i] == '.') {
-            mantissa = curr_line[i + 1] - '0';
-            break;
-          } else {
-            exp = exp * 10 + (curr_line[i] - '0');
-          }
-        }
-      }
-      */
-
       ptr++;
       if (*ptr == '-') {
           negative = true;
@@ -352,7 +325,7 @@ void mmap_sol(const std::string &file_path) {
   std::atomic_int32_t current_chunk{0};
 
   const size_t page_size = getPageSize_POSIX();
-  size_t chunk_sz = 64 * page_size;
+  size_t chunk_sz = 128 * page_size;
   const size_t n_chunks = (bytes + chunk_sz - 1) / chunk_sz;
 
   for (size_t i = 0; i < n_threads; ++i) {
