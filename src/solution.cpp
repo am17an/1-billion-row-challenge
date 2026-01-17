@@ -220,21 +220,22 @@ struct HashTable {
     }
   }
 
-  void merge(HashTable & other) {
-      for (size_t i = 0; i < HTABLE_SZ; ++i) {
-          if (!other.entries[i].occupied) continue;
+  void merge(HashTable &other) {
+    for (size_t i = 0; i < HTABLE_SZ; ++i) {
+      if (!other.entries[i].occupied)
+        continue;
 
-          // Look up by key, not by index - keys may be at different positions
-          size_t key_len = strlen(other.keys[i]);
-          MeasureV2& e1 = get(other.keys[i], key_len);
-          auto& e2 = other.entries[i];
+      // Look up by key, not by index - keys may be at different positions
+      size_t key_len = strlen(other.keys[i]);
+      MeasureV2 &e1 = get(other.keys[i], key_len);
+      auto &e2 = other.entries[i];
 
-          e1.num_datapoints += e2.num_datapoints;
-          e1.running_c_sum += e2.running_c_sum;
-          e1.running_mant_sum += e2.running_mant_sum;
-          e1.max = std::max(e1.max, e2.max);
-          e1.min = std::min(e1.min, e2.min);
-      }
+      e1.num_datapoints += e2.num_datapoints;
+      e1.running_c_sum += e2.running_c_sum;
+      e1.running_mant_sum += e2.running_mant_sum;
+      e1.max = std::max(e1.max, e2.max);
+      e1.min = std::min(e1.min, e2.min);
+    }
   }
 
   void print() {
@@ -285,76 +286,76 @@ void mmap_sol(const std::string &file_path) {
     return;
   }
 
-  //size_t offset = 0;
+  // size_t offset = 0;
 
   // char curr_line[256];
 
-  auto do_chunk = [&](char * chunk_start, char * chunk_end, bool is_first_chunk, HashTable & hash_table) {
+  auto do_chunk = [&](char *chunk_start, char *chunk_end, bool is_first_chunk,
+                      HashTable &hash_table) {
+    char *byte_arr = (char *)chunk_start;
+    size_t curr = 0;
 
-      char *byte_arr = (char *)chunk_start;
-      size_t curr = 0;
+    if (!is_first_chunk) {
+      while (*byte_arr != '\n')
+        byte_arr++;
+      byte_arr++;
+    }
 
-      if (!is_first_chunk) {
-          while (*byte_arr != '\n') byte_arr++;
-          byte_arr++;
-      }
+    char *curr_line = byte_arr;
 
-      char *curr_line = byte_arr;
+    auto process_line = [&]() {
+      int str_end = 0;
+      bool parse_int = false;
 
-      auto process_line = [&]() {
-        int str_end = 0;
-        bool parse_int = false;
+      int32_t exp = 0;
+      int32_t mantissa = 0;
+      bool negative = false;
 
-        int32_t exp = 0;
-        int32_t mantissa = 0;
-        bool negative = false;
+      for (size_t i = 0; i < curr; ++i) {
+        if (curr_line[i] == ';') {
+          parse_int = true;
+          str_end = i;
+          continue;
+        }
 
-        for (size_t i = 0; i < curr; ++i) {
-          if (curr_line[i] == ';') {
-            parse_int = true;
-            str_end = i;
+        if (parse_int) {
+          if (curr_line[i] == '-') {
+            negative = true;
             continue;
           }
-
-          if (parse_int) {
-            if (curr_line[i] == '-') {
-              negative = true;
-              continue;
-            }
-            if (curr_line[i] == '.') {
-              mantissa = curr_line[i + 1] - '0';
-              break;
-            } else {
-              exp = exp * 10 + (curr_line[i] - '0');
-            }
+          if (curr_line[i] == '.') {
+            mantissa = curr_line[i + 1] - '0';
+            break;
+          } else {
+            exp = exp * 10 + (curr_line[i] - '0');
           }
         }
-
-        MeasureV2 &measure = hash_table.get(curr_line, str_end);
-
-        // float temp = (exp + mantissa/10.0)*(negative ? -1 : 1);
-        int8_t c = (negative ? -1 : 1) * exp;
-        int8_t mant = (negative ? -1 : 1) * mantissa;
-        FixedPoint temp{c, mant};
-
-        measure.num_datapoints++;
-        measure.max = std::max(temp, measure.max);
-        measure.min = std::min(temp, measure.min);
-        measure.running_c_sum += c;
-        measure.running_mant_sum += mant;
-      };
-
-      while (byte_arr != chunk_end) {
-         if (*byte_arr == '\n') {
-             process_line();
-             curr = 0;
-             curr_line = byte_arr + 1;
-        } else {
-            curr++;
-        }
-        byte_arr++;
       }
 
+      MeasureV2 &measure = hash_table.get(curr_line, str_end);
+
+      // float temp = (exp + mantissa/10.0)*(negative ? -1 : 1);
+      int8_t c = (negative ? -1 : 1) * exp;
+      int8_t mant = (negative ? -1 : 1) * mantissa;
+      FixedPoint temp{c, mant};
+
+      measure.num_datapoints++;
+      measure.max = std::max(temp, measure.max);
+      measure.min = std::min(temp, measure.min);
+      measure.running_c_sum += c;
+      measure.running_mant_sum += mant;
+    };
+
+    while (byte_arr != chunk_end) {
+      if (*byte_arr == '\n') {
+        process_line();
+        curr = 0;
+        curr_line = byte_arr + 1;
+      } else {
+        curr++;
+      }
+      byte_arr++;
+    }
   };
 
   size_t n_threads = std::thread::hardware_concurrency();
@@ -368,38 +369,40 @@ void mmap_sol(const std::string &file_path) {
 
   const size_t page_size = getPageSize_POSIX();
   size_t chunk_sz = 64 * page_size;
-  const size_t n_chunks = (bytes + chunk_sz - 1)/chunk_sz;
+  const size_t n_chunks = (bytes + chunk_sz - 1) / chunk_sz;
 
-  for (size_t i = 0 ; i < n_threads; ++i) {
-      threads.emplace_back([&, i]() {
-          while(true) {
-              size_t chunk = current_chunk.fetch_add(1, std::memory_order_relaxed);
+  for (size_t i = 0; i < n_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      while (true) {
+        size_t chunk = current_chunk.fetch_add(1, std::memory_order_relaxed);
 
-              if (chunk >= n_chunks) break;
+        if (chunk >= n_chunks)
+          break;
 
-              char * start = (char *)addr + chunk * chunk_sz;
-              char * end   = std::min((char *)addr + (chunk + 1) * chunk_sz, (char *)addr + bytes);
+        char *start = (char *)addr + chunk * chunk_sz;
+        char *end = std::min((char *)addr + (chunk + 1) * chunk_sz,
+                             (char *)addr + bytes);
 
-              while (end < (char *)addr + bytes && *end != '\n') {
-                  end++;
-              }
+        while (end < (char *)addr + bytes && *end != '\n') {
+          end++;
+        }
 
-              do_chunk(start, end, (chunk == 0), hash_tables[i]);
-          }
-      });
+        do_chunk(start, end, (chunk == 0), hash_tables[i]);
+      }
+    });
   }
 
-  for (auto & th: threads) {
-      th.join();
+  for (auto &th : threads) {
+    th.join();
   }
 
   for (size_t i = 1; i < n_threads; ++i) {
-      hash_tables[0].merge(hash_tables[i]);
+    hash_tables[0].merge(hash_tables[i]);
   }
 
   // print_map(mp);
-  //do_chunk((char *)addr, (char *)addr + bytes/2, true, hash_table);
-  //do_chunk((char *)addr + bytes/2, (char *)addr + bytes, false, hash_table);
+  // do_chunk((char *)addr, (char *)addr + bytes/2, true, hash_table);
+  // do_chunk((char *)addr + bytes/2, (char *)addr + bytes, false, hash_table);
 
   hash_tables[0].print();
 
