@@ -146,12 +146,11 @@ inline size_t fast_hash(const char *buf, size_t len) {
 struct HashTable {
 
   static constexpr size_t HTABLE_SZ = 4096;
+  static constexpr size_t HTABLE_MASK = HTABLE_SZ - 1;
 
   MeasureV2 entries[HTABLE_SZ]{};
   char keys[HTABLE_SZ][32];
-
-  size_t occupancy = 0;
-  // insert into x, y, z
+  uint8_t key_lens[HTABLE_SZ]{};  // Just store length, not hash
 
   HashTable() {
     for (size_t i = 0; i < HTABLE_SZ; ++i) {
@@ -161,26 +160,36 @@ struct HashTable {
 
   MeasureV2 &get(const char *str, size_t len) {
     size_t hash = fast_hash(str, len);
-    size_t offset = hash % HTABLE_SZ;
+    size_t offset = hash & HTABLE_MASK;
 
+    // Fast path: empty slot
     if (!entries[offset].occupied) {
+      entries[offset].occupied = true;
+      key_lens[offset] = len;
       memcpy(keys[offset], str, len);
       keys[offset][len] = '\0';
-      entries[offset].occupied = true;
+      return entries[offset];
+    }
+
+    // Check if it's a match (most common case for repeated cities)
+    if (key_lens[offset] == len && memcmp(keys[offset], str, len) == 0) {
       return entries[offset];
     }
 
     // Linear probing for collision
-    while (entries[offset].occupied && strncmp(keys[offset], str, len) != 0) {
-      offset = (offset + 1) % HTABLE_SZ;
+    offset = (offset + 1) & HTABLE_MASK;
+    while (entries[offset].occupied) {
+      if (key_lens[offset] == len && memcmp(keys[offset], str, len) == 0) {
+        return entries[offset];
+      }
+      offset = (offset + 1) & HTABLE_MASK;
     }
 
-    if (!entries[offset].occupied) {
-      entries[offset].occupied = true;
-      memcpy(keys[offset], str, len);
-      keys[offset][len] = '\0';
-    }
-
+    // New entry after collision
+    entries[offset].occupied = true;
+    key_lens[offset] = len;
+    memcpy(keys[offset], str, len);
+    keys[offset][len] = '\0';
     return entries[offset];
   }
 
@@ -190,8 +199,7 @@ struct HashTable {
         continue;
 
       // Look up by key, not by index - keys may be at different positions
-      size_t key_len = strlen(other.keys[i]);
-      MeasureV2 &e1 = get(other.keys[i], key_len);
+      MeasureV2 &e1 = get(other.keys[i], other.key_lens[i]);
       auto &e2 = other.entries[i];
 
       e1.num_datapoints += e2.num_datapoints;
@@ -250,6 +258,9 @@ void mmap_sol(const std::string &file_path) {
     return;
   }
 
+  // Request transparent huge pages for better TLB performance
+  madvise(addr, bytes, MADV_HUGEPAGE);
+
   auto do_chunk = [&](char *chunk_start, char *chunk_end, bool is_first_chunk,
                       HashTable &hash_table) {
     char *byte_arr = (char *)chunk_start;
@@ -264,15 +275,21 @@ void mmap_sol(const std::string &file_path) {
     char *curr_line = byte_arr;
 
     auto process_line = [&]() {
-      int str_end = 0;
-
       int32_t exp = 0;
       int32_t mantissa = 0;
       bool negative = false;
 
-      char * ptr = (char *)memchr(curr_line, ';', curr);
-      str_end = ptr - curr_line;
+      // Find semicolon by searching backwards - temperature is 3-5 chars
+      // Formats: X.X (3), -X.X (4), XX.X (4), -XX.X (5)
+      char *line_end = curr_line + curr;
+      char *ptr;
+      if (line_end[-4] == ';') ptr = line_end - 4;
+      else if (line_end[-5] == ';') ptr = line_end - 5;
+      else ptr = line_end - 6;
+
+      size_t str_end = ptr - curr_line;
       ptr++;
+
       if (*ptr == '-') {
           negative = true;
           ptr++;
@@ -281,11 +298,9 @@ void mmap_sol(const std::string &file_path) {
       if (ptr[1] == '.') {
           exp = ptr[0] - '0';
           mantissa = ptr[2] - '0';
-      } else if (ptr[2] == '.') {
+      } else {
           exp = (ptr[0] - '0')*10 + (ptr[1] - '0');
           mantissa = ptr[3] - '0';
-      } else {
-          assert(false);
       }
 
       MeasureV2 &measure = hash_table.get(curr_line, str_end);
@@ -302,12 +317,10 @@ void mmap_sol(const std::string &file_path) {
       measure.running_mant_sum += mant;
     };
 
-    while (byte_arr != chunk_end) {
-      char * ptr = (char *)memchr(byte_arr, '\n', chunk_end - byte_arr);
+    while (byte_arr < chunk_end) {
+      char *ptr = (char *)memchr(byte_arr, '\n', chunk_end - byte_arr);
+      if (!ptr) return;
 
-      if (!ptr) {
-          return;
-      }
       curr = ptr - byte_arr;
       curr_line = byte_arr;
       process_line();
@@ -339,6 +352,14 @@ void mmap_sol(const std::string &file_path) {
         char *start = (char *)addr + chunk * chunk_sz;
         char *end = std::min((char *)addr + (chunk + 1) * chunk_sz,
                              (char *)addr + bytes);
+
+        // Prefetch next chunk while we process this one
+        if ((chunk + 1) * chunk_sz < bytes) {
+          char *next_start = (char *)addr + (chunk + 1) * chunk_sz;
+          for (size_t off = 0; off < chunk_sz; off += 4096) {
+            __builtin_prefetch(next_start + off, 0, 0);
+          }
+        }
 
         while (end < (char *)addr + bytes && *end != '\n') {
           end++;
