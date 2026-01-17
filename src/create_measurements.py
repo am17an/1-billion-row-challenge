@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/ usr / bin / env python3
 """
 Generate measurements.txt for the 1 Billion Row Challenge.
 
@@ -13,10 +13,10 @@ import sys
 import time
 from pathlib import Path
 
-# Default number of rows
+#Default number of rows
 DEFAULT_NUM_ROWS = 1_000_000_000
 
-# Path configuration
+#Path configuration
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 DATA_DIR = PROJECT_DIR / "data"
@@ -40,10 +40,10 @@ def load_stations(filepath: Path) -> list[tuple[str, float]]:
 def generate_measurement(station: tuple[str, float]) -> str:
     """Generate a single measurement line."""
     name, mean_temp = station
-    # Generate temperature with normal distribution around mean
-    # Standard deviation of 10 degrees for realistic variation
+#Generate temperature with normal distribution around mean
+#Standard deviation of 10 degrees for realistic variation
     temp = random.gauss(mean_temp, 10.0)
-    # Clamp to valid range
+#Clamp to valid range
     temp = max(-99.9, min(99.9, temp))
     return f"{name};{temp:.1f}\n"
 
@@ -57,7 +57,7 @@ def create_measurements(num_rows: int, output_path: Path) -> None:
     print(f"Generating {num_rows:,} measurements to {output_path}...")
     print("This may take a while for large datasets...")
 
-    # Ensure output directory exists
+#Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()
@@ -66,13 +66,13 @@ def create_measurements(num_rows: int, output_path: Path) -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         rows_written = 0
         while rows_written < num_rows:
-            # Generate a batch
+#Generate a batch
             batch_count = min(batch_size, num_rows - rows_written)
             batch = [generate_measurement(random.choice(stations)) for _ in range(batch_count)]
             f.writelines(batch)
             rows_written += batch_count
 
-            # Progress update
+#Progress update
             elapsed = time.time() - start_time
             progress = rows_written / num_rows * 100
             rate = rows_written / elapsed if elapsed > 0 else 0
@@ -97,14 +97,12 @@ def main():
 
     if len(sys.argv) > 1:
         try:
-            num_rows = int(sys.argv[1])
-        except ValueError:
-            print(f"Usage: {sys.argv[0]} [num_rows]")
-            print(f"  num_rows: Number of measurements to generate (default: {DEFAULT_NUM_ROWS:,})")
-            sys.exit(1)
+            num_rows
+= int(sys.argv[1]) except ValueError
+    : print(f "Usage: {sys.argv[0]} [num_rows]")
+          print(f "  num_rows: Number of measurements to generate (default: "
+                  "{DEFAULT_NUM_ROWS:,})") sys.exit(1)
 
-    create_measurements(num_rows, OUTPUT_FILE)
+              create_measurements(num_rows, OUTPUT_FILE)
 
-
-if __name__ == "__main__":
-    main()
+                  if __name__ == "__main__" : main()
