@@ -24,6 +24,30 @@
 #include <sys/stat.h>
 
 #include <thread>
+#include <immintrin.h>
+
+// AVX2 SIMD newline finder - scans 32 bytes at a time
+inline const char* find_newline_avx2(const char* start, const char* end) {
+    const __m256i newline = _mm256_set1_epi8('\n');
+
+    // Process 32 bytes at a time
+    while (start + 32 <= end) {
+        __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(start));
+        __m256i cmp = _mm256_cmpeq_epi8(chunk, newline);
+        int mask = _mm256_movemask_epi8(cmp);
+        if (mask != 0) {
+            return start + __builtin_ctz(mask);
+        }
+        start += 32;
+    }
+
+    // Handle remaining bytes
+    while (start < end) {
+        if (*start == '\n') return start;
+        start++;
+    }
+    return nullptr;
+}
 
 struct Measure {
   int32_t num_datapoints{};
@@ -32,34 +56,15 @@ struct Measure {
   float max{std::numeric_limits<float>::min()};
 };
 
-struct FixedPoint {
-  int8_t c;
-  int8_t mant;
-
-  friend bool operator<(const FixedPoint &a, const FixedPoint &b) {
-    if (a.c == b.c) {
-      return a.mant < b.mant;
-    }
-    return a.c < b.c;
-  }
-
-  friend std::ostream &operator<<(std::ostream &os, const FixedPoint &x) {
-    os << (int)x.c << "." << (int)std::abs(x.mant);
-    return os;
-  }
-};
-
 struct MeasureV2 {
   int32_t num_datapoints{};
-  int32_t running_c_sum{0};
-  int32_t running_mant_sum{0};
-  FixedPoint min{127, 127};
-  FixedPoint max{-128, -128};
+  int64_t sum{0};           // Sum of (temp * 10)
+  int16_t min{999};         // temp * 10 (max possible: 99.9 * 10 = 999)
+  int16_t max{-999};        // temp * 10 (min possible: -99.9 * 10 = -999)
   bool occupied{false};
 
   float mean() const {
-    double total = running_c_sum + running_mant_sum / 10.;
-    return total / num_datapoints;
+    return (sum / 10.0) / num_datapoints;
   }
 };
 
@@ -129,9 +134,10 @@ long getPageSize_POSIX() {
   return pageSize;
 }
 
-inline size_t fast_hash(const char *buf, size_t len) {
-  uint64_t h = 0;
-  memcpy(&h, buf, std::min(len, 8UL));
+inline std::pair<size_t, uint64_t> fast_hash_with_prefix(const char *buf, size_t len) {
+  uint64_t prefix = 0;
+  memcpy(&prefix, buf, std::min(len, 8UL));
+  uint64_t h = prefix;
   if (len > 8) {
     uint64_t h2 = 0;
     memcpy(&h2, buf + 8, std::min(len - 8, 8UL));
@@ -140,7 +146,7 @@ inline size_t fast_hash(const char *buf, size_t len) {
   h ^= len;
   h *= 0x9e3779b97f4a7c15ULL;
   h ^= h >> 33;
-  return h;
+  return {h, prefix};
 }
 
 struct HashTable {
@@ -150,7 +156,8 @@ struct HashTable {
 
   MeasureV2 entries[HTABLE_SZ]{};
   char keys[HTABLE_SZ][32];
-  uint8_t key_lens[HTABLE_SZ]{};  // Just store length, not hash
+  uint8_t key_lens[HTABLE_SZ]{};
+  uint64_t key_prefix[HTABLE_SZ]{};  // First 8 bytes for fast comparison
 
   HashTable() {
     for (size_t i = 0; i < HTABLE_SZ; ++i) {
@@ -158,28 +165,36 @@ struct HashTable {
     }
   }
 
+  inline bool keys_equal(size_t offset, const char *str, size_t len, uint64_t prefix) const {
+    if (key_lens[offset] != len) return false;
+    if (key_prefix[offset] != prefix) return false;
+    if (len <= 8) return true;
+    return memcmp(keys[offset] + 8, str + 8, len - 8) == 0;
+  }
+
   MeasureV2 &get(const char *str, size_t len) {
-    size_t hash = fast_hash(str, len);
+    auto [hash, prefix] = fast_hash_with_prefix(str, len);
     size_t offset = hash & HTABLE_MASK;
 
     // Fast path: empty slot
     if (!entries[offset].occupied) {
       entries[offset].occupied = true;
       key_lens[offset] = len;
+      key_prefix[offset] = prefix;
       memcpy(keys[offset], str, len);
       keys[offset][len] = '\0';
       return entries[offset];
     }
 
     // Check if it's a match (most common case for repeated cities)
-    if (key_lens[offset] == len && memcmp(keys[offset], str, len) == 0) {
+    if (keys_equal(offset, str, len, prefix)) {
       return entries[offset];
     }
 
     // Linear probing for collision
     offset = (offset + 1) & HTABLE_MASK;
     while (entries[offset].occupied) {
-      if (key_lens[offset] == len && memcmp(keys[offset], str, len) == 0) {
+      if (keys_equal(offset, str, len, prefix)) {
         return entries[offset];
       }
       offset = (offset + 1) & HTABLE_MASK;
@@ -188,6 +203,7 @@ struct HashTable {
     // New entry after collision
     entries[offset].occupied = true;
     key_lens[offset] = len;
+    key_prefix[offset] = prefix;
     memcpy(keys[offset], str, len);
     keys[offset][len] = '\0';
     return entries[offset];
@@ -203,8 +219,7 @@ struct HashTable {
       auto &e2 = other.entries[i];
 
       e1.num_datapoints += e2.num_datapoints;
-      e1.running_c_sum += e2.running_c_sum;
-      e1.running_mant_sum += e2.running_mant_sum;
+      e1.sum += e2.sum;
       e1.max = std::max(e1.max, e2.max);
       e1.min = std::min(e1.min, e2.min);
     }
@@ -227,8 +242,10 @@ struct HashTable {
       std::stringstream ss;
       ss << std::fixed;
       float avg = val.second.mean();
+      float max_val = val.second.max / 10.0f;
+      float min_val = val.second.min / 10.0f;
       ss << std::setprecision(1) << val.first << "=" << avg << "/"
-         << val.second.max << "/" << val.second.min << ", ";
+         << max_val << "/" << min_val << ", ";
       ans += ss.str();
     }
     ans += "}";
@@ -275,10 +292,6 @@ void mmap_sol(const std::string &file_path) {
     char *curr_line = byte_arr;
 
     auto process_line = [&]() {
-      int32_t exp = 0;
-      int32_t mantissa = 0;
-      bool negative = false;
-
       // Find semicolon by searching backwards - temperature is 3-5 chars
       // Formats: X.X (3), -X.X (4), XX.X (4), -XX.X (5)
       char *line_end = curr_line + curr;
@@ -290,41 +303,40 @@ void mmap_sol(const std::string &file_path) {
       size_t str_end = ptr - curr_line;
       ptr++;
 
-      if (*ptr == '-') {
-          negative = true;
-          ptr++;
-      }
-
-      if (ptr[1] == '.') {
-          exp = ptr[0] - '0';
-          mantissa = ptr[2] - '0';
+      // Parse temperature with branch hints
+      // Formats: X.X, XX.X, -X.X, -XX.X
+      int16_t temp;
+      if (__builtin_expect(*ptr != '-', 1)) {
+        // Positive (most common case first)
+        if (__builtin_expect(ptr[1] == '.', 1)) {
+          temp = 10 * (ptr[0] - '0') + (ptr[2] - '0');
+        } else {
+          temp = 100 * (ptr[0] - '0') + 10 * (ptr[1] - '0') + (ptr[3] - '0');
+        }
       } else {
-          exp = (ptr[0] - '0')*10 + (ptr[1] - '0');
-          mantissa = ptr[3] - '0';
+        ptr++;
+        if (__builtin_expect(ptr[1] == '.', 1)) {
+          temp = -(10 * (ptr[0] - '0') + (ptr[2] - '0'));
+        } else {
+          temp = -(100 * (ptr[0] - '0') + 10 * (ptr[1] - '0') + (ptr[3] - '0'));
+        }
       }
 
       MeasureV2 &measure = hash_table.get(curr_line, str_end);
-
-      // float temp = (exp + mantissa/10.0)*(negative ? -1 : 1);
-      int8_t c = (negative ? -1 : 1) * exp;
-      int8_t mant = (negative ? -1 : 1) * mantissa;
-      FixedPoint temp{c, mant};
-
       measure.num_datapoints++;
-      measure.max = std::max(temp, measure.max);
+      measure.sum += temp;
       measure.min = std::min(temp, measure.min);
-      measure.running_c_sum += c;
-      measure.running_mant_sum += mant;
+      measure.max = std::max(temp, measure.max);
     };
 
     while (byte_arr < chunk_end) {
-      char *ptr = (char *)memchr(byte_arr, '\n', chunk_end - byte_arr);
+      const char *ptr = find_newline_avx2(byte_arr, chunk_end);
       if (!ptr) return;
 
       curr = ptr - byte_arr;
       curr_line = byte_arr;
       process_line();
-      byte_arr = ptr + 1;
+      byte_arr = const_cast<char*>(ptr) + 1;
     }
   };
 
