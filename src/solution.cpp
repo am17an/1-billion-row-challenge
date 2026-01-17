@@ -129,9 +129,23 @@ long getPageSize_POSIX() {
   return pageSize;
 }
 
+inline size_t fast_hash(const char *buf, size_t len) {
+  uint64_t h = 0;
+  memcpy(&h, buf, std::min(len, 8UL));
+  if (len > 8) {
+    uint64_t h2 = 0;
+    memcpy(&h2, buf + 8, std::min(len - 8, 8UL));
+    h ^= h2 << 1;
+  }
+  h ^= len;
+  h *= 0x9e3779b97f4a7c15ULL;
+  h ^= h >> 33;
+  return h;
+}
+
 struct HashTable {
 
-  static constexpr size_t HTABLE_SZ = 1024;
+  static constexpr size_t HTABLE_SZ = 2048;
 
   MeasureV2 entries[HTABLE_SZ]{};
   char keys[HTABLE_SZ][32];
@@ -145,79 +159,29 @@ struct HashTable {
     }
   }
 
-  template <size_t NE> size_t fnv1a_hash(const char *buf) {
-    size_t hash = 0xcbf29ce484222325ULL;
-#pragma GCC unroll 8
-    for (size_t i = 0; i < NE; ++i) {
-      hash ^= static_cast<size_t>(buf[i]);
-      hash *= 0x100000001b3ULL;
-    }
-    return hash;
-  }
-
-  template <size_t NE> MeasureV2 &hash_str(const char *str) {
-    size_t hash = 0;
-    char buf[32];
-#pragma GCC unroll 8
-    for (size_t i = 0; i < NE; ++i) {
-      buf[i] = str[i];
-      // hash += hash*31 + str[i];
-    }
-
-    hash = fnv1a_hash<NE>(str);
-
+  MeasureV2 &get(const char *str, size_t len) {
+    size_t hash = fast_hash(str, len);
     size_t offset = hash % HTABLE_SZ;
 
     if (!entries[offset].occupied) {
-      memcpy(keys[offset], buf, NE);
-      keys[offset][NE] = '\0';
-
+      memcpy(keys[offset], str, len);
+      keys[offset][len] = '\0';
       entries[offset].occupied = true;
       return entries[offset];
-    } else {
-      // printf("Collision! %s %s %zu", keys[hash%HTABLE_SZ], buf, hash);
-      int offset = hash % HTABLE_SZ;
-      while (entries[offset].occupied && strncmp(keys[offset], buf, NE) != 0) {
-        offset = (offset + 1) % HTABLE_SZ;
-      }
-
-      if (!entries[offset].occupied) {
-        entries[offset].occupied = true;
-        memcpy(keys[offset], buf, NE);
-        keys[offset][NE] = '\0';
-      }
-
-      return entries[offset];
     }
-  }
-  MeasureV2 &get(const char *begin, size_t sz) {
 
-#define CASE(N)                                                                \
-  case N:                                                                      \
-    return hash_str<N>(begin);                                                 \
-    break;
-    switch (sz) {
-      CASE(1);
-      CASE(2);
-      CASE(3);
-      CASE(4);
-      CASE(5);
-      CASE(6);
-      CASE(7);
-      CASE(8);
-      CASE(9);
-      CASE(10);
-      CASE(11);
-      CASE(12);
-      CASE(13);
-      CASE(14);
-      CASE(15);
-      CASE(16);
-      CASE(17);
-    default:
-      assert(false);
-      break;
+    // Linear probing for collision
+    while (entries[offset].occupied && strncmp(keys[offset], str, len) != 0) {
+      offset = (offset + 1) % HTABLE_SZ;
     }
+
+    if (!entries[offset].occupied) {
+      entries[offset].occupied = true;
+      memcpy(keys[offset], str, len);
+      keys[offset][len] = '\0';
+    }
+
+    return entries[offset];
   }
 
   void merge(HashTable &other) {
@@ -305,17 +269,19 @@ void mmap_sol(const std::string &file_path) {
 
     auto process_line = [&]() {
       int str_end = 0;
-      bool parse_int = false;
 
       int32_t exp = 0;
       int32_t mantissa = 0;
       bool negative = false;
 
+      char * ptr = (char *)memchr(curr_line, ';', curr);
+      str_end = ptr - curr_line;
+      /*
       for (size_t i = 0; i < curr; ++i) {
         if (curr_line[i] == ';') {
           parse_int = true;
           str_end = i;
-          continue;
+          break;
         }
 
         if (parse_int) {
@@ -330,6 +296,23 @@ void mmap_sol(const std::string &file_path) {
             exp = exp * 10 + (curr_line[i] - '0');
           }
         }
+      }
+      */
+
+      ptr++;
+      if (*ptr == '-') {
+          negative = true;
+          ptr++;
+      }
+
+      if (ptr[1] == '.') {
+          exp = ptr[0] - '0';
+          mantissa = ptr[2] - '0';
+      } else if (ptr[2] == '.') {
+          exp = (ptr[0] - '0')*10 + (ptr[1] - '0');
+          mantissa = ptr[3] - '0';
+      } else {
+          assert(false);
       }
 
       MeasureV2 &measure = hash_table.get(curr_line, str_end);
@@ -347,14 +330,15 @@ void mmap_sol(const std::string &file_path) {
     };
 
     while (byte_arr != chunk_end) {
-      if (*byte_arr == '\n') {
-        process_line();
-        curr = 0;
-        curr_line = byte_arr + 1;
-      } else {
-        curr++;
+      char * ptr = (char *)memchr(byte_arr, '\n', chunk_end - byte_arr);
+
+      if (!ptr) {
+          return;
       }
-      byte_arr++;
+      curr = ptr - byte_arr;
+      curr_line = byte_arr;
+      process_line();
+      byte_arr = ptr + 1;
     }
   };
 
@@ -399,10 +383,6 @@ void mmap_sol(const std::string &file_path) {
   for (size_t i = 1; i < n_threads; ++i) {
     hash_tables[0].merge(hash_tables[i]);
   }
-
-  // print_map(mp);
-  // do_chunk((char *)addr, (char *)addr + bytes/2, true, hash_table);
-  // do_chunk((char *)addr + bytes/2, (char *)addr + bytes, false, hash_table);
 
   hash_tables[0].print();
 
