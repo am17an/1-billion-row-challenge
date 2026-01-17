@@ -1,4 +1,4 @@
-#!/ usr / bin / env python3
+#!/usr/bin/env python3
 """
 Generate measurements.txt for the 1 Billion Row Challenge.
 
@@ -97,12 +97,14 @@ def main():
 
     if len(sys.argv) > 1:
         try:
-            num_rows
-= int(sys.argv[1]) except ValueError
-    : print(f "Usage: {sys.argv[0]} [num_rows]")
-          print(f "  num_rows: Number of measurements to generate (default: "
-                  "{DEFAULT_NUM_ROWS:,})") sys.exit(1)
+            num_rows = int(sys.argv[1])
+        except ValueError:
+            print(f"Usage: {sys.argv[0]} [num_rows]")
+            print(f"  num_rows: Number of measurements to generate (default: {DEFAULT_NUM_ROWS:,})")
+            sys.exit(1)
 
-              create_measurements(num_rows, OUTPUT_FILE)
+    create_measurements(num_rows, OUTPUT_FILE)
 
-                  if __name__ == "__main__" : main()
+
+if __name__ == "__main__":
+    main()
